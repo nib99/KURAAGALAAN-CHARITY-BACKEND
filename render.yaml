@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: kuraa-galaan-backend-js
+    env: node
+    plan: free
+    buildCommand: npm ci && npx prisma generate
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: NODE_ENV
+        value: production
+        sync: false
