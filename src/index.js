@@ -40,14 +40,11 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
 
-async function start() {
-  try {
-    await prisma.$connect();
-    app.listen(PORT, () => {
-      console.log(`🚀 Backend running on port ${PORT}`);
-    });
+app.listen(PORT, () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
+});
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);
