@@ -9,8 +9,10 @@ const { prisma } = require('./lib/prisma');
 
 const app = express();
 
+// Health check
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
+// Middleware
 app.use(express.json({ limit: '1mb' }));
 app.use(helmet());
 
@@ -34,7 +36,7 @@ app.use(rateLimit({
 app.use('/api/donate', donateRoutes);
 app.use('/api/users', userRoutes);
 
-// global error handler
+// Global error handler
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err?.message || err);
   res.status(500).json({ error: 'Internal Server Error' });
@@ -42,25 +44,31 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Backend running on port ${PORT}`);
-});
-   catch (err) {
-    console.error('Failed to start server:', err);
+// Wrap server start in async function
+async function start() {
+  try {
+    await prisma.$connect();
+    console.log('✅ Database connected');
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Backend running on port ${PORT}`);
+    });
+
+  } catch (err) {
+    console.error('❌ Failed to start server:', err);
     process.exit(1);
   }
 }
 
+// Start server
 start();
 
-process.on('SIGINT', async () => {
-  console.log('SIGINT - shutting down');
+// Graceful shutdown
+async function shutdown(signal) {
+  console.log(`${signal} - shutting down`);
   await prisma.$disconnect();
   process.exit(0);
-});
+}
 
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM - shutting down');
-  await prisma.$disconnect();
-  process.exit(0);
-});
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
