@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "src/index.js",
   "engines": {
-    "node": "18.x"
+    "node": ">=18"
   },
   "scripts": {
     "dev": "nodemon src/index.js",
