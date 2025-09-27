@@ -9,6 +9,9 @@ const { prisma } = require('./lib/prisma');
 
 const app = express();
 
+// Enable trust proxy for X-Forwarded-For header
+app.set('trust proxy', 1); // Add this line
+
 // Health check
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
@@ -50,8 +53,8 @@ async function start() {
     await prisma.$connect();
     console.log('✅ Database connected');
 
-    app.listen(PORT, () => {
-      console.log(`🚀 Backend running on port ${PORT}`);
+    app.listen(PORT, () => {  
+      console.log(`🚀 Backend running on port ${PORT}`);  
     });
 
   } catch (err) {
