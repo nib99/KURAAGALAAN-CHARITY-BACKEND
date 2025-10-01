@@ -1,117 +1,413 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
+const Donation = require('../models/Donation');
+const { 
+    initializeChapa, 
+    initializeStripe, 
+    initializeTelebirr, 
+    generateBankTransferDetails,
+    verifyPayment 
+} = require('../services/paymentService');
+const { 
+    sendDonationConfirmation, 
+    sendDonationNotificationToAdmin 
+} = require('../services/emailService');
+const { protect, admin } = require('../middleware/authMiddleware');
+const { asyncHandler } = require('../middleware/errorMiddleware');
+const logger = require('../utils/logger');
+const xss = require('xss');
+
 const router = express.Router();
-const { prisma } = require('../lib/prisma');
-const Stripe = require('stripe');
-const fetch = require('node-fetch');
 
-const stripe = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
-
-// Helper: create donation record
-async function createDonationRecord({ name, amount, method, reference }) {
-return prisma.donation.create({
-data: {
-name,
-amount: Number(amount),
-method,
-reference
-}
-});
-}
-
-/*
-POST /api/donate
-body: { name, amount, method, paymentMethodData }
-method: one of "stripe", "chapa", "telebirr", or "manual"
-*/
-router.post('/', async (req, res) => {
-try {
-const { name, amount, method, paymentMethodData } = req.body;
-if (!name || !amount || !method) {
-return res.status(400).json({ error: 'Missing required fields: name, amount, method' });
-}
-
-// Stripe flow (recommended for card payments / global)  
-if (method.toLowerCase() === 'stripe') {  
-  if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });  
-
-  // Create a PaymentIntent server-side  
-  const intent = await stripe.paymentIntents.create({  
-    amount: Math.round(Number(amount) * 100), // in cents  
-    currency: process.env.STRIPE_CURRENCY || 'usd',  
-    metadata: { donor: name },  
-  });  
-
-  // Save a tentative donation record with reference = intent id  
-  const donation = await createDonationRecord({ name, amount, method: 'stripe', reference: intent.id });  
-
-  return res.json({ success: true, provider: 'stripe', clientSecret: intent.client_secret, donation });  
-}  
-
-// Chapa flow (Ethiopia) - example (https://chapa.co)  
-if (method.toLowerCase() === 'chapa') {  
-  const chapaKey = process.env.CHAPA_SECRET_KEY;  
-  if (!chapaKey) return res.status(500).json({ error: 'Chapa not configured' });  
-
-  // Example request payload to initialize payment (adjust per Chapa docs)  
-  const chapaPayload = {  
-    amount: Number(amount),  
-    currency: process.env.CHAPA_CURRENCY || 'ETB',  
-    email: paymentMethodData?.email || 'donor@example.com',  
-    first_name: name,  
-    callback_url: paymentMethodData?.callback_url || `${process.env.FRONTEND_URL}/donation-success`,  
-    reference: `chapa_${Date.now()}`  
-  };  
-
-  const resp = await fetch('https://api.chapa.co/v1/transaction/initialize', {  
-    method: 'POST',  
-    headers: {  
-      Authorization: `Bearer ${chapaKey}`,  
-      'Content-Type': 'application/json'  
-    },  
-    body: JSON.stringify(chapaPayload)  
-  });  
-
-  const chapaRes = await resp.json();  
-
-  // Save record with chapa tx reference if available  
-  const donation = await createDonationRecord({ name, amount, method: 'chapa', reference: chapaRes?.data?.checkout_url || chapaPayload.reference });  
-
-  return res.json({ success: true, provider: 'chapa', chapa: chapaRes, donation });  
-}  
-
-// Telebirr flow (placeholder) - Telebirr integration often uses specific APIs  
-if (method.toLowerCase() === 'telebirr') {  
-  // Telebirr integration is country-specific; typically you receive a payment token from client/Telebirr then verify server-side.  
-  // Placeholder: record donation and return instructions  
-  const ref = `telebirr_${Date.now()}`;  
-  const donation = await createDonationRecord({ name, amount, method: 'telebirr', reference: ref });  
-  return res.json({ success: true, provider: 'telebirr', message: 'Use Telebirr app to transfer to account XYZ', donation });  
-}  
-
-// Manual / bank transfer  
-if (method.toLowerCase() === 'manual' || method.toLowerCase() === 'bank') {  
-  const ref = `manual_${Date.now()}`;  
-  const donation = await createDonationRecord({ name, amount, method: 'manual', reference: ref });  
-  return res.json({ success: true, provider: 'manual', donation });  
-}  
-
-return res.status(400).json({ error: 'Unsupported payment method' });
-
-} catch (err) {
-console.error('donate error:', err);
-return res.status(500).json({ error: 'Server error' });
-}
+// Rate limiting for donations
+const donationLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 5, // 5 donations per minute per IP
+    message: {
+        success: false,
+        error: 'Too many donation attempts. Please wait a moment before trying again.'
+    }
 });
 
-router.get('/', async (_req, res) => {
-try {
-const donations = await prisma.donation.findMany({ orderBy: { createdAt: 'desc' } });
-res.json({ success: true, donations });
-} catch (err) {
-console.error('donations fetch error:', err);
-res.status(500).json({ error: 'Server error' });
-}
-});
+// Validation rules
+const donationValidation = [
+    body('name')
+        .trim()
+        .isLength({ min: 2, max: 100 })
+        .withMessage('Name must be between 2 and 100 characters')
+        .matches(/^[a-zA-Z\s\u1200-\u137F]+$/)
+        .withMessage('Name can only contain letters and spaces'),
+    
+    body('email')
+        .optional({ checkFalsy: true })
+        .isEmail()
+        .normalizeEmail()
+        .withMessage('Please provide a valid email address'),
+    
+    body('phone')
+        .optional({ checkFalsy: true })
+        .matches(/^(\+251|0)?[79]\d{8}$/)
+        .withMessage('Please provide a valid Ethiopian phone number'),
+    
+    body('amount')
+        .isFloat({ min: 1, max: 1000000 })
+        .withMessage('Amount must be between 1 and 1,000,000'),
+    
+    body('currency')
+        .isIn(['ETB', 'USD', 'EUR', 'SAR'])
+        .withMessage('Currency must be ETB, USD, EUR, or SAR'),
+    
+    body('method')
+        .isIn(['chapa', 'stripe', 'telebirr', 'manual'])
+        .withMessage('Payment method must be chapa, stripe, telebirr, or manual'),
+    
+    body('message')
+        .optional({ checkFalsy: true })
+        .isLength({ max: 500 })
+        .withMessage('Message cannot exceed 500 characters'),
+    
+    body('anonymous')
+        .optional()
+        .isBoolean()
+        .withMessage('Anonymous must be true or false')
+];
+
+// Currency conversion rates (should be updated regularly)
+const exchangeRates = {
+    'USD': 55.50, // 1 USD = 55.50 ETB
+    'EUR': 60.25, // 1 EUR = 60.25 ETB
+    'SAR': 14.80, // 1 SAR = 14.80 ETB
+    'ETB': 1.00   // 1 ETB = 1.00 ETB
+};
+
+// Convert amount to ETB for reporting
+const convertToETB = (amount, currency) => {
+    return parseFloat((amount * exchangeRates[currency]).toFixed(2));
+};
+
+// @desc    Process new donation
+// @route   POST /api/donate
+// @access  Public
+router.post('/', donationLimiter, donationValidation, asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({
+            success: false,
+            error: 'Validation failed',
+            details: errors.array()
+        });
+    }
+
+    const { 
+        name, 
+        email, 
+        phone, 
+        amount, 
+        currency, 
+        method, 
+        message, 
+        anonymous 
+    } = req.body;
+
+    // Sanitize inputs
+    const sanitizedData = {
+        name: xss(name.trim()),
+        email: email ? xss(email.trim()) : null,
+        phone: phone ? xss(phone.trim()) : null,
+        amount: parseFloat(amount),
+        currency: currency.toUpperCase(),
+        method: method.toLowerCase(),
+        message: message ? xss(message.trim()) : null,
+        anonymous: anonymous === true,
+        ip_address: req.ip,
+        user_agent: req.get('User-Agent'),
+        referer: req.get('Referer')
+    };
+
+    // Convert amount to ETB
+    sanitizedData.amount_etb = convertToETB(sanitizedData.amount, sanitizedData.currency);
+
+    try {
+        // Create donation record
+        const donation = await Donation.create(sanitizedData);
+
+        logger.payment('donation_created', {
+            donationId: donation.id,
+            amount: `${sanitizedData.amount} ${sanitizedData.currency}`,
+            method: sanitizedData.method,
+            donor: sanitizedData.anonymous ? 'Anonymous' : sanitizedData.name
+        });
+
+        let paymentResponse;
+
+        // Process payment based on method
+        switch (sanitizedData.method) {
+            case 'chapa':
+                paymentResponse = await initializeChapa(donation, req);
+                break;
+            case 'stripe':
+                paymentResponse = await initializeStripe(donation, req);
+                break;
+            case 'telebirr':
+                paymentResponse = await initializeTelebirr(donation, req);
+                break;
+            case 'manual':
+                paymentResponse = await generateBankTransferDetails(donation);
+                break;
+            default:
+                throw new Error('Unsupported payment method');
+        }
+
+        // Update donation with payment details
+        await donation.update({
+            transaction_id: paymentResponse.transaction_id,
+            payment_reference: paymentResponse.reference,
+            payment_data: JSON.stringify(paymentResponse)
+        });
+
+        // Send confirmation email if email provided
+        if (sanitizedData.email) {
+            try {
+                await sendDonationConfirmation(sanitizedData.email, donation, paymentResponse);
+            } catch (emailError) {
+                logger.error('Failed to send donation confirmation email:', emailError);
+                // Don't fail the donation if email fails
+            }
+        }
+
+        // Send admin notification
+        try {
+            await sendDonationNotificationToAdmin(donation, paymentResponse);
+        } catch (emailError) {
+            logger.error('Failed to send admin notification:', emailError);
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Donation initiated successfully',
+            donation_id: donation.id,
+            amount: `${sanitizedData.amount} ${sanitizedData.currency}`,
+            method: sanitizedData.method,
+            status: donation.status,
+            ...paymentResponse
+        });
+
+    } catch (error) {
+        logger.error('Donation processing failed:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to process donation',
+            message: process.env.NODE_ENV === 'development' ? error.message : 'Please try again later'
+        });
+    }
+}));
+
+// @desc    Get donation status
+// @route   GET /api/donate/:id
+// @access  Public
+router.get('/:id', asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const donation = await Donation.findByPk(id, {
+        attributes: [
+            'id', 'name', 'amount', 'currency', 'method', 
+            'status', 'message', 'anonymous', 'created_at'
+        ]
+    });
+
+    if (!donation) {
+        return res.status(404).json({
+            success: false,
+            error: 'Donation not found'
+        });
+    }
+
+    res.json({
+        success: true,
+        donation: {
+            id: donation.id,
+            donor_name: donation.getDonorName(),
+            amount: donation.getDisplayAmount(),
+            method: donation.method,
+            status: donation.status,
+            message: donation.message,
+            date: donation.created_at
+        }
+    });
+}));
+
+// @desc    List donations with filters and pagination
+// @route   GET /api/donate
+// @access  Private (Admin)
+router.get('/', protect, admin, asyncHandler(async (req, res) => {
+    const {
+        page = 1,
+        limit = 20,
+        status,
+        method,
+        currency,
+        start_date,
+        end_date,
+        search
+    } = req.query;
+
+    const offset = (page - 1) * limit;
+    const where = {};
+
+    // Apply filters
+    if (status) where.status = status;
+    if (method) where.method = method;
+    if (currency) where.currency = currency;
+    
+    if (start_date && end_date) {
+        where.created_at = {
+            [Op.between]: [new Date(start_date), new Date(end_date)]
+        };
+    }
+
+    if (search) {
+        where[Op.or] = [
+            { name: { [Op.like]: `%${search}%` } },
+            { email: { [Op.like]: `%${search}%` } },
+            { id: { [Op.like]: `%${search}%` } }
+        ];
+    }
+
+    const { count, rows: donations } = await Donation.findAndCountAll({
+        where,
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        order: [['created_at', 'DESC']]
+    });
+
+    res.json({
+        success: true,
+        donations,
+        pagination: {
+            current_page: parseInt(page),
+            total_pages: Math.ceil(count / limit),
+            total_items: count,
+            items_per_page: parseInt(limit)
+        }
+    });
+}));
+
+// @desc    Verify payment status
+// @route   POST /api/donate/:id/verify
+// @access  Private (Admin)
+router.post('/:id/verify', protect, admin, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const donation = await Donation.findByPk(id);
+    if (!donation) {
+        return res.status(404).json({
+            success: false,
+            error: 'Donation not found'
+        });
+    }
+
+    try {
+        const verificationResult = await verifyPayment(donation);
+        
+        // Update donation status based on verification
+        if (verificationResult.status === 'completed') {
+            await donation.update({
+                status: 'completed',
+                verified_at: new Date(),
+                verified_by: req.user.id
+            });
+        } else if (verificationResult.status === 'failed') {
+            await donation.update({
+                status: 'failed',
+                error_message: verificationResult.message || 'Payment verification failed'
+            });
+        }
+
+        logger.payment('payment_verified', {
+            donationId: donation.id,
+            status: verificationResult.status,
+            verifiedBy: req.user.email
+        });
+
+        res.json({
+            success: true,
+            message: 'Payment verification completed',
+            status: verificationResult.status,
+            donation: {
+                id: donation.id,
+                status: donation.status,
+                verified_at: donation.verified_at
+            }
+        });
+
+    } catch (error) {
+        logger.error('Payment verification failed:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Payment verification failed',
+            message: error.message
+        });
+    }
+}));
+
+// @desc    Update donation status
+// @route   PUT /api/donate/:id/status
+// @access  Private (Admin)
+router.put('/:id/status', protect, admin, [
+    body('status')
+        .isIn(['pending', 'completed', 'failed', 'refunded', 'cancelled'])
+        .withMessage('Invalid status'),
+    body('admin_notes')
+        .optional()
+        .isLength({ max: 1000 })
+        .withMessage('Admin notes cannot exceed 1000 characters')
+], asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({
+            success: false,
+            error: 'Validation failed',
+            details: errors.array()
+        });
+    }
+
+    const { id } = req.params;
+    const { status, admin_notes } = req.body;
+
+    const donation = await Donation.findByPk(id);
+    if (!donation) {
+        return res.status(404).json({
+            success: false,
+            error: 'Donation not found'
+        });
+    }
+
+    const oldStatus = donation.status;
+    
+    await donation.update({
+        status,
+        admin_notes: admin_notes || donation.admin_notes,
+        updated_by: req.user.id
+    });
+
+    logger.payment('donation_status_updated', {
+        donationId: donation.id,
+        oldStatus,
+        newStatus: status,
+        updatedBy: req.user.email
+    });
+
+    res.json({
+        success: true,
+        message: 'Donation status updated successfully',
+        donation: {
+            id: donation.id,
+            status: donation.status,
+            admin_notes: donation.admin_notes,
+            updated_at: donation.updated_at
+        }
+    });
+}));
 
 module.exports = router;
-
