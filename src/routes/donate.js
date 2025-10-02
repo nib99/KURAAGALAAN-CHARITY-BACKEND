@@ -1,7 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
-const Donation = require('../models/Donation');
+const Donation = require('../models/donation');
 const { 
     initializeChapa, 
     initializeStripe, 
