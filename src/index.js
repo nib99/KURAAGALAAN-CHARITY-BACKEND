@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const donateRoutes = require('./routes/donate');
+const donationRoutes = require('./routes/donation');
 const userRoutes = require('./routes/users');
 const { prisma } = require('./lib/prisma');
 
@@ -36,7 +36,7 @@ app.use(rateLimit({
   legacyHeaders: false
 }));
 
-app.use('/api/donate', donateRoutes);
+app.use('/api/donation', donationRoutes);
 app.use('/api/users', userRoutes);
 
 // Global error handler
