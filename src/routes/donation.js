@@ -46,7 +46,7 @@ router.post('/create', async (req, res) => {
     
     res.status(201).json({
       success: true,
-      message: 'Donation initiated successfully',
+      message: 'donation initiated successfully',
       donation_id: donation.id,
       amount: `${donation.amount} ${donation.currency}`,
       method: donation.method,
