@@ -68,7 +68,7 @@ router.get('/history', async (req, res) => {
   try {
     res.json({
       success: true,
-      message: 'Donation history endpoint working',
+      message: 'donation history endpoint working',
       data: []
     });
   } catch (error) {
@@ -87,9 +87,9 @@ router.get('/stats', async (req, res) => {
   try {
     res.json({
       success: true,
-      message: 'Donation stats endpoint working',
+      message: 'donation stats endpoint working',
       data: {
-        totalDonations: 0,
+        totaldonations: 0,
         totalAmount: 0,
         donorCount: 0
       }
