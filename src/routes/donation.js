@@ -89,7 +89,7 @@ router.get('/stats', async (req, res) => {
       success: true,
       message: 'donation stats endpoint working',
       data: {
-        totaldonations: 0,
+        totalDonations: 0,
         totalAmount: 0,
         donorCount: 0
       }
