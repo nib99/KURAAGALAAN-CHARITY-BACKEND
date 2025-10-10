@@ -5,7 +5,7 @@ const router = express.Router();
 // @route   POST /api/donation/create
 // @desc    Create new donation
 // @access  Public
-router.post('/create', async (req, res) => {
+router.get('/create', async (req, res) => {
   try {
     const { name, email, phone, amount, currency, method, message, anonymous } = req.body;
     
@@ -106,7 +106,7 @@ router.get('/stats', async (req, res) => {
 // @route   POST /api/donation/verify
 // @desc    Verify payment
 // @access  Public
-router.post('/verify', async (req, res) => {
+router.get('/verify', async (req, res) => {
   try {
     const { donation_id, payment_id } = req.body;
     
