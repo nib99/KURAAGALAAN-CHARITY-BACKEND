@@ -4,7 +4,7 @@ const router = express.Router();
 // @route   POST /api/donation/create
 // @desc    Create a new donation
 // @access  Public
-router.post("/create", async (req, res) => {
+router.post("/donation/create", async (req, res) => {
   try {
     const { name, email, phone, amount, currency, method, message, anonymous } = req.body;
 
