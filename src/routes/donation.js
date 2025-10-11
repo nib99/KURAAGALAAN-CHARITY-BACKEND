@@ -52,8 +52,8 @@ router.post("/create", async (req, res) => {
           message: "Bank transfer donation recorded successfully.",
           donation_id: donation.id,
           bankDetails: {
-            accountName: "Kuraa Galaan Charity Organization",
-            accountNumber: "1000123456789",
+            accountName: "Kura Galan Charity Organization",
+            accountNumber: "1000449482167",
             bankName: "Commercial Bank of Ethiopia",
             branch: "Bole Branch",
             swiftCode: "CBETETAA",
