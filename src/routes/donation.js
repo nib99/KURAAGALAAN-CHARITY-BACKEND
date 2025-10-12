@@ -1,7 +1,9 @@
-// routes/donate.js
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
+const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();
 
 // Validation rules
 const donationValidation = [
@@ -9,8 +11,8 @@ const donationValidation = [
     .trim()
     .isLength({ min: 2, max: 100 })
     .withMessage('Name must be between 2 and 100 characters')
-    .matches(/^[a-zA-Z\s\u1200-\u137F]+$/)
-    .withMessage('Name can only contain letters and spaces'),
+    .matches(/^[a-zA-Z\s\u1200-\u137F-]+$/)
+    .withMessage('Name can only contain letters, spaces, and hyphens'),
   body('email')
     .optional({ checkFalsy: true })
     .isEmail()
@@ -20,6 +22,12 @@ const donationValidation = [
     .optional({ checkFalsy: true })
     .matches(/^(\+251|0)?[79]\d{8}$/)
     .withMessage('Please provide a valid Ethiopian phone number'),
+  body().custom((value, { req }) => {
+    if (!req.body.anonymous && !req.body.email && !req.body.phone) {
+      throw new Error('Email or phone is required for non-anonymous donations');
+    }
+    return true;
+  }),
   body('amount')
     .isFloat({ min: 1, max: 1000000 })
     .withMessage('Amount must be between 1 and 1,000,000'),
@@ -27,8 +35,8 @@ const donationValidation = [
     .isIn(['ETB', 'USD', 'EUR', 'SAR'])
     .withMessage('Currency must be ETB, USD, EUR, or SAR'),
   body('method')
-    .isIn(['chapa', 'stripe', 'telebirr', 'paypal', 'bank transfer', 'manual', 'bank_transfer']) // Added bank_transfer
-    .withMessage('Payment method must be chapa, stripe, telebirr, paypal, bank transfer,manual, or bank_transfer'),
+    .isIn(['chapa', 'stripe', 'telebirr', 'paypal', 'bank_transfer'])
+    .withMessage('Payment method must be chapa, stripe, telebirr, paypal, or bank_transfer'),
   body('message')
     .optional({ checkFalsy: true })
     .isLength({ max: 500 })
@@ -36,12 +44,27 @@ const donationValidation = [
   body('anonymous')
     .optional()
     .isBoolean()
-    .withMessage('Anonymous must be true or false')
+    .withMessage('Anonymous must be true or false'),
 ];
 
+// Helper function to get PayPal access token
+const getPayPalAccessToken = async () => {
+  const response = await axios.post(
+    'https://api-m.sandbox.paypal.com/v1/oauth2/token',
+    'grant_type=client_credentials',
+    {
+      headers: {
+        Authorization: `Basic ${Buffer.from(
+          `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+        ).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    }
+  );
+  return response.data.access_token;
+};
+
 // @route   POST /api/donations/create
-// @desc    Create a new donation
-// @access  Public
 router.post('/create', donationValidation, async (req, res) => {
   try {
     // Check validation errors
@@ -52,7 +75,7 @@ router.post('/create', donationValidation, async (req, res) => {
 
     const { name, email, phone, amount, currency, method, message, anonymous } = req.body;
 
-    // Simplified exchange rates (ETB base)
+    // Simplified exchange rates (replace with API call in production)
     const exchangeRates = {
       USD: 55.5,
       EUR: 60.25,
@@ -65,7 +88,7 @@ router.post('/create', donationValidation, async (req, res) => {
 
     // Donation object
     const donation = {
-      id: 'donation_' + Date.now(),
+      id: uuidv4(),
       name: anonymous ? 'Anonymous' : name,
       email: email || null,
       phone: phone || null,
@@ -79,23 +102,70 @@ router.post('/create', donationValidation, async (req, res) => {
       created_at: new Date().toISOString(),
     };
 
+    // Save to database (uncomment when database is set up)
+    // await Donation.create(donation);
+
     // Payment processing
     switch (method) {
-      case 'manual':
       case 'bank_transfer':
         return res.json({
           success: true,
           type: 'redirect',
-          message: 'Bank transfer donation recorded successfully.',
+          message: 'Redirecting to bank transfer instructions',
           donation_id: donation.id,
+          payment_url: `${process.env.WEBSITE_URL}/bank-transfer-instructions?donation_id=${donation.id}`,
           bankDetails: {
-            accountName: 'Kuraa Galaan Charity Organization', // Fixed typo
-            accountNumber: '1000449482167',
-            bankName: 'Commercial Bank of Ethiopia',
-            branch: 'Bole Branch',
-            swiftCode: 'CBETETAA',
-            instructions: 'Please transfer the amount and send the transaction receipt to kuraagalaan2024@gmail.com with your donation ID.',
+            accountName: process.env.BANK_ACCOUNT_NAME || 'Kuraa Galaan Charity Organization',
+            accountNumber: process.env.BANK_ACCOUNT_NUMBER || '1000449482167',
+            bankName: process.env.BANK_NAME || 'Commercial Bank of Ethiopia',
+            branch: process.env.BANK_BRANCH || 'Bole Branch',
+            swiftCode: process.env.BANK_SWIFT_CODE || 'CBETETAA',
+            instructions: `Please transfer ${donation.amount} ${donation.currency} to the provided account and send the transaction receipt to ${process.env.CONTACT_EMAIL} with donation ID ${donation.id}.`,
           },
+        });
+
+      case 'paypal':
+        // Get PayPal access token
+        const accessToken = await getPayPalAccessToken();
+
+        // Create PayPal payment
+        const paypalResponse = await axios.post(
+          'https://api-m.sandbox.paypal.com/v2/checkout/orders',
+          {
+            intent: 'CAPTURE',
+            purchase_units: [
+              {
+                amount: {
+                  currency_code: currency,
+                  value: amount.toFixed(2),
+                },
+                description: `Donation to Kuraa Galaan Charity (ID: ${donation.id})`,
+              },
+            ],
+            application_context: {
+              return_url: `${process.env.WEBSITE_URL}/donation/success?donation_id=${donation.id}`,
+              cancel_url: `${process.env.WEBSITE_URL}/donation/cancel?donation_id=${donation.id}`,
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+
+        // Find the approval URL (redirect URL) in PayPal response
+        const approvalUrl = paypalResponse.data.links.find(
+          (link) => link.rel === 'approve'
+        ).href;
+
+        return res.json({
+          success: true,
+          type: 'redirect',
+          message: 'Redirect to PayPal payment page',
+          donation_id: donation.id,
+          payment_url: approvalUrl,
         });
 
       case 'chapa':
@@ -116,15 +186,6 @@ router.post('/create', donationValidation, async (req, res) => {
           payment_url: 'https://telebirr.et/pay/example-transaction',
         });
 
-      case 'paypal':
-        return res.json({
-          success: true,
-          type: 'redirect',
-          message: 'Redirect to PayPal donation page',
-          donation_id: donation.id,
-          payment_url: 'https://paypal.com/donate/example',
-        });
-
       case 'stripe':
         return res.json({
           success: true,
@@ -141,15 +202,15 @@ router.post('/create', donationValidation, async (req, res) => {
         });
     }
   } catch (error) {
-    console.error('Create donation error:', error);
-    res.status(500).json({
+    console.error('Create donation error:', error.message, error.stack);
+    return res.status(500).json({
       success: false,
-      message: 'Server error while processing donation',
+      message: `Server error: ${error.message}`,
     });
   }
 });
 
-// @route   GET /api/donations/history
+// Other endpoints (unchanged)
 router.get('/history', async (req, res) => {
   try {
     res.json({
@@ -165,7 +226,6 @@ router.get('/history', async (req, res) => {
   }
 });
 
-// @route   GET /api/donations/stats
 router.get('/stats', async (req, res) => {
   try {
     res.json({
@@ -185,11 +245,9 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-// @route   POST /api/donations/verify
 router.post('/verify', async (req, res) => {
   try {
     const { donation_id, payment_id } = req.body;
-
     res.json({
       success: true,
       message: 'Payment verification endpoint working',
