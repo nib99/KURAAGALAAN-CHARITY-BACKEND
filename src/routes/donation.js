@@ -27,8 +27,8 @@ const donationValidation = [
     .isIn(['ETB', 'USD', 'EUR', 'SAR'])
     .withMessage('Currency must be ETB, USD, EUR, or SAR'),
   body('method')
-    .isIn(['chapa', 'stripe', 'telebirr', 'manual', 'bank_transfer']) // Added bank_transfer
-    .withMessage('Payment method must be chapa, stripe, telebirr, manual, or bank_transfer'),
+    .isIn(['chapa', 'stripe', 'telebirr', 'paypal', 'bank transfer', 'manual', 'bank_transfer']) // Added bank_transfer
+    .withMessage('Payment method must be chapa, stripe, telebirr, paypal, bank transfer,manual, or bank_transfer'),
   body('message')
     .optional({ checkFalsy: true })
     .isLength({ max: 500 })
