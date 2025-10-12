@@ -85,7 +85,7 @@ router.post('/create', donationValidation, async (req, res) => {
       case 'bank_transfer':
         return res.json({
           success: true,
-          type: 'manual',
+          type: 'redirect',
           message: 'Bank transfer donation recorded successfully.',
           donation_id: donation.id,
           bankDetails: {
